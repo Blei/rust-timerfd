@@ -1,0 +1,8 @@
+[package]
+
+name = "timerfd"
+version = "0.0.1"
+authors = ["Philipp Brüschweiler <blei42@gmail.com>"]
+
+[dependencies.gtk]
+path="../dumb-gtk"
