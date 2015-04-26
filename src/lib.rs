@@ -3,21 +3,24 @@
 // Mostly mirroring the names in C
 #![allow(non_camel_case_types)]
 
-extern crate debug;
 extern crate gtk;
 extern crate libc;
 
+use std::cmp;
 use std::default;
+use std::io;
 use std::mem;
-use std::os;
 
-use gtk = gtk::ffi;
+use gtk::ffi;
 
-#[deriving(Default,Eq,PartialEq,Clone)]
+#[derive(Default,Eq,PartialEq,Clone,Debug)]
+#[repr(C)]
 pub struct timespec {
     pub tv_sec: libc::time_t,
     pub tv_nsec: libc::c_long,
 }
+
+impl Copy for timespec {}
 
 impl timespec {
     fn is_valid(&self) -> bool {
@@ -27,38 +30,41 @@ impl timespec {
 
     fn check_valid(&self) {
         if !self.is_valid() {
-            fail!("timespec is not in valid range: {:?}", self)
+            panic!("timespec is not in valid range: {:?}", self)
         }
     }
 }
 
 impl PartialOrd for timespec {
-    fn partial_cmp(&self, other: &timespec) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &timespec) -> Option<cmp::Ordering> {
         self.check_valid();
         other.check_valid();
         match self.tv_sec.partial_cmp(&other.tv_sec) {
-            Some(Equal) => self.tv_nsec.partial_cmp(&other.tv_nsec),
+            Some(cmp::Ordering::Equal) => self.tv_nsec.partial_cmp(&other.tv_nsec),
             c => c,
         }
     }
 }
 
 impl Ord for timespec {
-    fn cmp(&self, other: &timespec) -> Ordering {
+    fn cmp(&self, other: &timespec) -> cmp::Ordering {
         self.check_valid();
         other.check_valid();
         match self.tv_sec.cmp(&other.tv_sec) {
-            Equal => self.tv_nsec.cmp(&other.tv_nsec),
+            cmp::Ordering::Equal => self.tv_nsec.cmp(&other.tv_nsec),
             ord => ord,
         }
     }
 }
 
-#[deriving(Default,Eq,PartialEq,Clone)]
+#[derive(Default,Eq,PartialEq,Clone)]
+#[repr(C)]
 pub struct itimerspec {
     pub it_interval: timespec,
     pub it_value: timespec,
 }
+
+impl Copy for itimerspec {}
 
 extern "C" {
     fn timerfd_create(clockid: libc::c_int, flags: libc::c_int) -> libc::c_int;
@@ -81,7 +87,7 @@ impl TimerFD {
         unsafe {
             let fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
             if fd == -1 {
-                fail!("Failed to create timerfd: `{}`", os::last_os_error());
+                panic!("Failed to create timerfd: `{}`", io::Error::last_os_error());
             }
             TimerFD { fd: fd }
         }
@@ -92,7 +98,7 @@ impl TimerFD {
             let mut result = mem::uninitialized();
             let ret = timerfd_settime(self.fd, 0, new_value, &mut result);
             if ret != 0 {
-                fail!("Failed to set time of timerfd: `{}`", os::last_os_error());
+                panic!("Failed to set time of timerfd: `{}`", io::Error::last_os_error());
             }
             result
         }
@@ -103,7 +109,7 @@ impl TimerFD {
             let mut result = mem::uninitialized();
             let ret = timerfd_gettime(self.fd, &mut result);
             if ret != 0 {
-                fail!("Failed to get time from timerfd: `{}`", os::last_os_error());
+                panic!("Failed to get time from timerfd: `{}`", io::Error::last_os_error());
             }
             result
         }
@@ -138,7 +144,7 @@ impl Timer {
     pub fn set_interval(&mut self, initial_ms: i64, interval_ms: i64) {
         assert!(initial_ms > 0);
         if self.active {
-            fail!("don't change time of an active timer");
+            panic!("don't change time of an active timer");
         }
         self.current.it_value.tv_sec  =  initial_ms / 1000;
         self.current.it_value.tv_nsec = (initial_ms % 1000) * 1000 * 1000;
@@ -153,7 +159,7 @@ impl Timer {
 
     pub fn start(&mut self) {
         if self.active {
-            fail!("calling start on an active timer");
+            panic!("calling start on an active timer");
         }
         self.timerfd.settime(&self.current);
         self.active = true;
@@ -161,7 +167,7 @@ impl Timer {
 
     pub fn stop(&mut self) {
         if !self.active {
-            fail!("calling stop on an non-active timer");
+            panic!("calling stop on an non-active timer");
         }
         let zero = default::Default::default();
         let res = self.current = self.timerfd.settime(&zero);
@@ -175,7 +181,7 @@ pub trait TimerGSourceCallback: Send {
 }
 
 struct TimerGSourceInner {
-    g_source: *mut gtk::GSource,
+    g_source: *mut ffi::GSource,
     timer: Timer,
     callback_object: Box<TimerGSourceCallback+Send>,
 }
@@ -186,30 +192,30 @@ pub struct TimerGSource {
 
 impl TimerGSource {
     pub fn new(callback_object: Box<TimerGSourceCallback+Send>) -> TimerGSource {
-        let mut tgsi = box TimerGSourceInner {
+        let mut tgsi = Box::new(TimerGSourceInner {
             g_source: unsafe {
-                gtk::g_source_new(&mut TIMER_GSOURCE_FUNCS as *mut gtk::GSourceFuncs,
-                                  mem::size_of::<gtk::GSource>() as gtk::guint)
+                ffi::g_source_new(&mut TIMER_GSOURCE_FUNCS as *mut ffi::GSourceFuncs,
+                                  mem::size_of::<ffi::GSource>() as ffi::guint)
             },
             timer: Timer::new(),
             callback_object: callback_object,
-        };
+        });
         unsafe {
-            gtk::g_source_set_callback(
+            ffi::g_source_set_callback(
                 tgsi.g_source,
                 Some(dispatch_timerfd_g_source_for_realz),
-                (&mut *tgsi as *mut TimerGSourceInner) as gtk::gpointer,
+                (&mut *tgsi as *mut TimerGSourceInner) as ffi::gpointer,
                 None);
         }
         TimerGSource { inner: tgsi }
     }
 
-    pub fn attach(&mut self, context: *mut gtk::GMainContext) {
+    pub fn attach(&mut self, context: *mut ffi::GMainContext) {
         unsafe {
-            let _tag = gtk::g_source_add_unix_fd(self.inner.g_source,
+            let _tag = ffi::g_source_add_unix_fd(self.inner.g_source,
                                                  self.inner.timer.timerfd.fd,
-                                                 gtk::G_IO_IN);
-            gtk::g_source_attach(self.inner.g_source, context);
+                                                 ffi::G_IO_IN);
+            ffi::g_source_attach(self.inner.g_source, context);
         }
     }
 
@@ -225,42 +231,43 @@ impl TimerGSource {
 impl Drop for TimerGSource {
     fn drop(&mut self) {
         unsafe {
-            gtk::g_source_destroy(self.inner.g_source);
-            gtk::g_source_unref(self.inner.g_source);
+            ffi::g_source_destroy(self.inner.g_source);
+            ffi::g_source_unref(self.inner.g_source);
         }
     }
 }
 
-extern "C" fn dispatch_timerfd_g_source_for_realz(user_data: gtk::gpointer) -> gtk::gboolean {
+extern "C" fn dispatch_timerfd_g_source_for_realz(user_data: ffi::gpointer) -> ffi::gboolean {
     let tgs = unsafe { &mut *(user_data as *mut TimerGSourceInner) };
 
     let cont = tgs.callback_object.callback(&mut tgs.timer);
 
     // Have to read, so old timer ticks are not messing up epoll
-    let mut buffer = [0, ..8];
+    let mut buffer = [0i8; 8];
     let n = unsafe {
         libc::read(
             tgs.timer.timerfd.fd,
-            (&mut buffer as *mut [i8, ..8]) as *mut libc::c_void,
+            (&mut buffer as *mut [i8; 8]) as *mut libc::c_void,
             8)
     };
     if n != 8 {
         // Can happen when the callback reads the fd as well
-        assert_eq!(os::errno() as libc::c_int, libc::EAGAIN);
+        let err = io::Error::last_os_error();
+        assert_eq!(err.raw_os_error().unwrap(), libc::EAGAIN);
     }
 
     if cont { 1 } else { 0 }
 }
 
-extern "C" fn dispatch_timerfd_g_source(src: *mut gtk::GSource,
-        callback: gtk::GSourceFunc, user_data: gtk::gpointer) -> gtk::gboolean {
+extern "C" fn dispatch_timerfd_g_source(src: *mut ffi::GSource,
+        callback: ffi::GSourceFunc, user_data: ffi::gpointer) -> ffi::gboolean {
 
     let tgs = unsafe { &mut *(user_data as *mut TimerGSourceInner) };
     assert_eq!(tgs.g_source, src);
     callback.expect("How could this happen? This must be set!")(user_data)
 }
 
-static mut TIMER_GSOURCE_FUNCS: gtk::GSourceFuncs = gtk::Struct__GSourceFuncs {
+static mut TIMER_GSOURCE_FUNCS: ffi::GSourceFuncs = ffi::Struct__GSourceFuncs {
     prepare: None,
     check: None,
     dispatch: Some(dispatch_timerfd_g_source),
